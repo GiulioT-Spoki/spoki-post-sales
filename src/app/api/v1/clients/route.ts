@@ -1,8 +1,9 @@
 import { NextRequest } from 'next/server';
 import { withAuth, createSuccessResponse, createErrorResponse, type AuthenticatedRequest } from '@/lib/api/middleware';
 import { pgQuery } from '@/lib/db/postgres';
+import { getOwnerByEmail } from '@/lib/config/owners';
 
-export const GET = withAuth(async (request: NextRequest, _auth: AuthenticatedRequest) => {
+export const GET = withAuth(async (request: NextRequest, auth: AuthenticatedRequest) => {
   try {
     const { searchParams } = new URL(request.url);
     const page = Math.max(1, parseInt(searchParams.get('page') ?? '1', 10));
@@ -10,7 +11,14 @@ export const GET = withAuth(async (request: NextRequest, _auth: AuthenticatedReq
     const offset = (page - 1) * pageSize;
     const q = searchParams.get('q') ?? '';
     const status = searchParams.get('status') ?? '';
-    const owner = searchParams.get('owner') ?? '';
+    const viewAll = searchParams.get('viewAll') === 'true';
+
+    // Auto-filter by logged-in user's HubSpot owner ID.
+    // If the user's email is not in the owners map they are a manager and see all clients.
+    const loggedInOwner = getOwnerByEmail(auth.email);
+    const owner = viewAll
+      ? (searchParams.get('owner') ?? '')
+      : (loggedInOwner?.id ?? searchParams.get('owner') ?? '');
 
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -25,14 +33,21 @@ export const GET = withAuth(async (request: NextRequest, _auth: AuthenticatedReq
       conditions.push(`c.cs_owner_id = $${idx++}`);
       params.push(owner);
     }
+    if (status) {
+      conditions.push(`hs.status = $${idx++}`);
+      params.push(status);
+    }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    // Filter by health status is done post-join
-    const healthFilter = status ? `WHERE hs.status = '${status}'` : '';
-
     const countRes = await pgQuery<{ count: string }>(
-      `SELECT COUNT(*) FROM clients c ${where}`,
+      `SELECT COUNT(*) FROM clients c
+       LEFT JOIN LATERAL (
+         SELECT score, status FROM health_scores
+         WHERE client_id = c.id
+         ORDER BY calculated_at DESC LIMIT 1
+       ) hs ON true
+       ${where}`,
       params
     );
     const total = parseInt(countRes.rows[0]?.count ?? '0', 10);
@@ -59,7 +74,6 @@ export const GET = withAuth(async (request: NextRequest, _auth: AuthenticatedReq
         ORDER BY calculated_at DESC LIMIT 1
       ) hs ON true
       ${where}
-      ${healthFilter ? `HAVING hs.status = '${status}'` : ''}
       ORDER BY hs.score ASC NULLS LAST, c.name ASC
       LIMIT ${pageSize} OFFSET ${offset}`,
       params

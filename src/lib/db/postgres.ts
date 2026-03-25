@@ -94,6 +94,18 @@ async function buildCloudSqlPoolConfig(): Promise<PoolConfig | null> {
 }
 
 function buildDirectPoolConfig(): PoolConfig {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (databaseUrl) {
+    return {
+      connectionString: databaseUrl,
+      max: 5, min: 0,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 10000,
+      allowExitOnIdle: true,
+      statement_timeout: STATEMENT_TIMEOUT_MS,
+      ssl: { rejectUnauthorized: false },
+    };
+  }
   return {
     host: config.postgres.host,
     port: config.postgres.port,
@@ -116,11 +128,8 @@ async function getPool(): Promise<Pool> {
   }
   if (pool) return pool;
 
-  if (!config.postgres.host && !config.postgres.instanceConnectionName) {
-    throw new Error('PostgreSQL not configured: set POSTGRES_HOST or CLOUD_SQL_INSTANCE_CONNECTION_NAME');
-  }
-  if (!config.postgres.user) {
-    throw new Error('PostgreSQL not configured: POSTGRES_USER is required');
+  if (!process.env.DATABASE_URL && !config.postgres.host && !config.postgres.instanceConnectionName) {
+    throw new Error('PostgreSQL not configured: set DATABASE_URL or POSTGRES_HOST');
   }
 
   const cloudConfig = await buildCloudSqlPoolConfig();

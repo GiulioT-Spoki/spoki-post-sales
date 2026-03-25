@@ -91,6 +91,21 @@ class HubSpotClient {
     });
   }
 
+  private async getWithRetry(url: string, params: Record<string, unknown>, attempt = 0): Promise<{ data: unknown }> {
+    try {
+      return await this.http.get(url, { params });
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 429 && attempt < 5) {
+        const wait = Math.pow(2, attempt) * 1000 + Math.random() * 500;
+        logger.warn(`HubSpot rate limit hit, retrying in ${Math.round(wait)}ms (attempt ${attempt + 1})`);
+        await new Promise(r => setTimeout(r, wait));
+        return this.getWithRetry(url, params, attempt + 1);
+      }
+      throw err;
+    }
+  }
+
   private async fetchAllPages<T>(
     url: string,
     params: Record<string, unknown>,
@@ -100,9 +115,7 @@ class HubSpotClient {
     let after: string | undefined;
 
     do {
-      const response = await this.http.get(url, {
-        params: { ...params, ...(after ? { after } : {}) },
-      });
+      const response = await this.getWithRetry(url, { ...params, ...(after ? { after } : {}) });
 
       const { results: items, paging } = response.data as {
         results: Array<{ id: string; properties: Record<string, string | null> }>;
@@ -129,9 +142,7 @@ class HubSpotClient {
     let after: string | undefined;
 
     do {
-      const response = await this.http.get(url, {
-        params: { ...params, associations: associationType, ...(after ? { after } : {}) },
-      });
+      const response = await this.getWithRetry(url, { ...params, associations: associationType, ...(after ? { after } : {}) });
 
       const { results: items, paging } = response.data as {
         results: Array<{

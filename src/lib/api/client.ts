@@ -29,8 +29,8 @@ async function fetchApi<T>(
 
 // ─── Clients ─────────────────────────────────────────────────────────────────
 export const clientsApi = {
-  list: (token: string, params?: { page?: number; q?: string; status?: string; owner?: string }) => {
-    const qs = new URLSearchParams(params as Record<string, string>).toString();
+  list: (token: string, params?: { page?: number; q?: string; status?: string; owner?: string; viewAll?: boolean }) => {
+    const qs = new URLSearchParams(params as unknown as Record<string, string>).toString();
     return fetchApi<PaginatedResponse<ClientWithHealth>>(`/clients${qs ? `?${qs}` : ''}`, { token });
   },
   get: (token: string, id: string) =>

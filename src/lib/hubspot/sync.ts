@@ -1,7 +1,6 @@
 /**
  * HubSpot → PostgreSQL sync engine.
- * Upserts companies, contacts, tickets, and engagements.
- * Called by the /api/v1/hubspot/sync cron endpoint.
+ * Uses batch upserts (UNNEST) for performance — one query per object type instead of N queries.
  */
 
 import { pgQuery } from '@/lib/db/postgres';
@@ -23,46 +22,77 @@ export interface SyncResult {
 
 async function syncCompanies(companies: HSCompany[]): Promise<number> {
   if (companies.length === 0) return 0;
+
+  // Batch upsert in chunks of 200
+  const CHUNK = 200;
   let count = 0;
 
-  for (const c of companies) {
+  for (let i = 0; i < companies.length; i += CHUNK) {
+    const chunk = companies.slice(i, i + CHUNK);
+
+    const hubspotIds = chunk.map(c => c.id);
+    const names = chunk.map(c => c.name ?? '');
+    const domains = chunk.map(c => c.domain);
+    const industries = chunk.map(c => c.industry);
+    const cities = chunk.map(c => c.city);
+    const countries = chunk.map(c => c.country);
+    const phones = chunk.map(c => c.phone);
+    const lifecycleStages = chunk.map(c => c.lifecycleStage);
+    const plans = chunk.map(c => c.plan);
+    const mrrs = chunk.map(c => c.mrr);
+    const contractValues = chunk.map(c => c.contractValue);
+    const contractStartDates = chunk.map(c => c.contractStartDate ? new Date(c.contractStartDate) : null);
+    const renewalDates = chunk.map(c => c.renewalDate ? new Date(c.renewalDate) : null);
+    const onboardingStatuses = chunk.map(c => c.onboardingStatus);
+    const csOwnerIds = chunk.map(c => c.csOwnerId);
+    const churnRisks = chunk.map(c => c.churnRisk);
+    const rawProps = chunk.map(c => JSON.stringify(c.rawProperties));
+
     await pgQuery(
       `INSERT INTO clients (
         hubspot_id, name, domain, industry, city, country, phone,
         lifecycle_stage, plan, mrr, contract_value, contract_start_date,
         renewal_date, onboarding_status, cs_owner_id, churn_risk,
         raw_properties, last_synced_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW(),NOW())
+      )
+      SELECT * FROM UNNEST(
+        $1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[],
+        $8::text[], $9::text[], $10::numeric[], $11::numeric[], $12::date[],
+        $13::date[], $14::text[], $15::text[], $16::text[],
+        $17::jsonb[], $18::timestamptz[], $19::timestamptz[]
+      ) AS t(hubspot_id, name, domain, industry, city, country, phone,
+             lifecycle_stage, plan, mrr, contract_value, contract_start_date,
+             renewal_date, onboarding_status, cs_owner_id, churn_risk,
+             raw_properties, last_synced_at, updated_at)
       ON CONFLICT (hubspot_id) DO UPDATE SET
-        name               = EXCLUDED.name,
-        domain             = EXCLUDED.domain,
-        industry           = EXCLUDED.industry,
-        city               = EXCLUDED.city,
-        country            = EXCLUDED.country,
-        phone              = EXCLUDED.phone,
-        lifecycle_stage    = EXCLUDED.lifecycle_stage,
-        plan               = EXCLUDED.plan,
-        mrr                = EXCLUDED.mrr,
-        contract_value     = EXCLUDED.contract_value,
-        contract_start_date= EXCLUDED.contract_start_date,
-        renewal_date       = EXCLUDED.renewal_date,
-        onboarding_status  = COALESCE(EXCLUDED.onboarding_status, clients.onboarding_status),
-        cs_owner_id        = EXCLUDED.cs_owner_id,
-        churn_risk         = EXCLUDED.churn_risk,
-        raw_properties     = EXCLUDED.raw_properties,
-        last_synced_at     = NOW(),
-        updated_at         = NOW()`,
+        name                = EXCLUDED.name,
+        domain              = EXCLUDED.domain,
+        industry            = EXCLUDED.industry,
+        city                = EXCLUDED.city,
+        country             = EXCLUDED.country,
+        phone               = EXCLUDED.phone,
+        lifecycle_stage     = EXCLUDED.lifecycle_stage,
+        plan                = EXCLUDED.plan,
+        mrr                 = EXCLUDED.mrr,
+        contract_value      = EXCLUDED.contract_value,
+        contract_start_date = EXCLUDED.contract_start_date,
+        renewal_date        = EXCLUDED.renewal_date,
+        onboarding_status   = COALESCE(EXCLUDED.onboarding_status, clients.onboarding_status),
+        cs_owner_id         = EXCLUDED.cs_owner_id,
+        churn_risk          = EXCLUDED.churn_risk,
+        raw_properties      = EXCLUDED.raw_properties,
+        last_synced_at      = NOW(),
+        updated_at          = NOW()`,
       [
-        c.id, c.name, c.domain, c.industry, c.city, c.country, c.phone,
-        c.lifecycleStage, c.plan,
-        c.mrr, c.contractValue,
-        c.contractStartDate ? new Date(c.contractStartDate) : null,
-        c.renewalDate ? new Date(c.renewalDate) : null,
-        c.onboardingStatus, c.csOwnerId, c.churnRisk,
-        JSON.stringify(c.rawProperties),
+        hubspotIds, names, domains, industries, cities, countries, phones,
+        lifecycleStages, plans, mrrs, contractValues, contractStartDates,
+        renewalDates, onboardingStatuses, csOwnerIds, churnRisks,
+        rawProps,
+        chunk.map(() => new Date()),
+        chunk.map(() => new Date()),
       ]
     );
-    count++;
+    count += chunk.length;
   }
 
   return count;
@@ -72,20 +102,38 @@ async function syncCompanies(companies: HSCompany[]): Promise<number> {
 
 async function syncContacts(contacts: HSContact[]): Promise<number> {
   if (contacts.length === 0) return 0;
+
+  // Build hubspot_id → internal client UUID map
+  const companyHubspotIds = [...new Set(contacts.map(c => c.companyId).filter(Boolean))] as string[];
+  const clientMap: Record<string, string> = {};
+
+  if (companyHubspotIds.length > 0) {
+    const res = await pgQuery<{ hubspot_id: string; id: string }>(
+      `SELECT hubspot_id, id FROM clients WHERE hubspot_id = ANY($1::text[])`,
+      [companyHubspotIds]
+    );
+    for (const row of res.rows) clientMap[row.hubspot_id] = row.id;
+  }
+
+  const CHUNK = 200;
   let count = 0;
 
-  for (const c of contacts) {
-    const clientRes = c.companyId
-      ? await pgQuery<{ id: string }>('SELECT id FROM clients WHERE hubspot_id = $1', [c.companyId])
-      : null;
-    const clientId = clientRes?.rows[0]?.id ?? null;
+  for (let i = 0; i < contacts.length; i += CHUNK) {
+    const chunk = contacts.slice(i, i + CHUNK);
 
     await pgQuery(
       `INSERT INTO contacts (
         hubspot_id, client_id, email, first_name, last_name,
         phone, job_title, lifecycle_stage, owner_id,
         last_activity_at, raw_properties, last_synced_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+      )
+      SELECT * FROM UNNEST(
+        $1::text[], $2::uuid[], $3::text[], $4::text[], $5::text[],
+        $6::text[], $7::text[], $8::text[], $9::text[],
+        $10::timestamptz[], $11::jsonb[], $12::timestamptz[], $13::timestamptz[]
+      ) AS t(hubspot_id, client_id, email, first_name, last_name,
+             phone, job_title, lifecycle_stage, owner_id,
+             last_activity_at, raw_properties, last_synced_at, updated_at)
       ON CONFLICT (hubspot_id) DO UPDATE SET
         client_id        = EXCLUDED.client_id,
         email            = EXCLUDED.email,
@@ -100,13 +148,22 @@ async function syncContacts(contacts: HSContact[]): Promise<number> {
         last_synced_at   = NOW(),
         updated_at       = NOW()`,
       [
-        c.id, clientId, c.email, c.firstName, c.lastName,
-        c.phone, c.jobTitle, c.lifecycleStage, c.ownerId,
-        c.lastActivityDate ? new Date(c.lastActivityDate) : null,
-        JSON.stringify(c.rawProperties),
+        chunk.map(c => c.id),
+        chunk.map(c => (c.companyId ? clientMap[c.companyId] ?? null : null)),
+        chunk.map(c => c.email),
+        chunk.map(c => c.firstName),
+        chunk.map(c => c.lastName),
+        chunk.map(c => c.phone),
+        chunk.map(c => c.jobTitle),
+        chunk.map(c => c.lifecycleStage),
+        chunk.map(c => c.ownerId),
+        chunk.map(c => c.lastActivityDate ? new Date(c.lastActivityDate) : null),
+        chunk.map(c => JSON.stringify(c.rawProperties)),
+        chunk.map(() => new Date()),
+        chunk.map(() => new Date()),
       ]
     );
-    count++;
+    count += chunk.length;
   }
 
   return count;
@@ -116,20 +173,37 @@ async function syncContacts(contacts: HSContact[]): Promise<number> {
 
 async function syncTickets(tickets: HSTicket[]): Promise<number> {
   if (tickets.length === 0) return 0;
+
+  const companyHubspotIds = [...new Set(tickets.map(t => t.companyId).filter(Boolean))] as string[];
+  const clientMap: Record<string, string> = {};
+
+  if (companyHubspotIds.length > 0) {
+    const res = await pgQuery<{ hubspot_id: string; id: string }>(
+      `SELECT hubspot_id, id FROM clients WHERE hubspot_id = ANY($1::text[])`,
+      [companyHubspotIds]
+    );
+    for (const row of res.rows) clientMap[row.hubspot_id] = row.id;
+  }
+
+  const CHUNK = 200;
   let count = 0;
 
-  for (const t of tickets) {
-    const clientRes = t.companyId
-      ? await pgQuery<{ id: string }>('SELECT id FROM clients WHERE hubspot_id = $1', [t.companyId])
-      : null;
-    const clientId = clientRes?.rows[0]?.id ?? null;
+  for (let i = 0; i < tickets.length; i += CHUNK) {
+    const chunk = tickets.slice(i, i + CHUNK);
 
     await pgQuery(
       `INSERT INTO tickets (
         hubspot_id, client_id, subject, content, status,
         priority, pipeline, owner_id, opened_at, closed_at,
         last_modified_at, raw_properties, last_synced_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+      )
+      SELECT * FROM UNNEST(
+        $1::text[], $2::uuid[], $3::text[], $4::text[], $5::text[],
+        $6::text[], $7::text[], $8::text[], $9::timestamptz[], $10::timestamptz[],
+        $11::timestamptz[], $12::jsonb[], $13::timestamptz[]
+      ) AS t(hubspot_id, client_id, subject, content, status,
+             priority, pipeline, owner_id, opened_at, closed_at,
+             last_modified_at, raw_properties, last_synced_at)
       ON CONFLICT (hubspot_id) DO UPDATE SET
         client_id        = EXCLUDED.client_id,
         subject          = EXCLUDED.subject,
@@ -144,15 +218,22 @@ async function syncTickets(tickets: HSTicket[]): Promise<number> {
         raw_properties   = EXCLUDED.raw_properties,
         last_synced_at   = NOW()`,
       [
-        t.id, clientId, t.subject, t.content, t.status,
-        t.priority, t.pipeline, t.ownerId,
-        t.openedAt ? new Date(t.openedAt) : null,
-        t.closedAt ? new Date(t.closedAt) : null,
-        t.lastModifiedAt ? new Date(t.lastModifiedAt) : null,
-        JSON.stringify(t.rawProperties),
+        chunk.map(t => t.id),
+        chunk.map(t => (t.companyId ? clientMap[t.companyId] ?? null : null)),
+        chunk.map(t => t.subject),
+        chunk.map(t => t.content),
+        chunk.map(t => t.status),
+        chunk.map(t => t.priority),
+        chunk.map(t => t.pipeline),
+        chunk.map(t => t.ownerId),
+        chunk.map(t => t.openedAt ? new Date(t.openedAt) : null),
+        chunk.map(t => t.closedAt ? new Date(t.closedAt) : null),
+        chunk.map(t => t.lastModifiedAt ? new Date(t.lastModifiedAt) : null),
+        chunk.map(t => JSON.stringify(t.rawProperties)),
+        chunk.map(() => new Date()),
       ]
     );
-    count++;
+    count += chunk.length;
   }
 
   return count;
@@ -162,24 +243,45 @@ async function syncTickets(tickets: HSTicket[]): Promise<number> {
 
 async function syncEngagements(engagements: HSEngagement[]): Promise<number> {
   if (engagements.length === 0) return 0;
+
+  const companyHubspotIds = [...new Set(engagements.map(e => e.companyId).filter(Boolean))] as string[];
+  const contactHubspotIds = [...new Set(engagements.map(e => e.contactId).filter(Boolean))] as string[];
+
+  const clientMap: Record<string, string> = {};
+  const contactMap: Record<string, string> = {};
+
+  if (companyHubspotIds.length > 0) {
+    const res = await pgQuery<{ hubspot_id: string; id: string }>(
+      `SELECT hubspot_id, id FROM clients WHERE hubspot_id = ANY($1::text[])`,
+      [companyHubspotIds]
+    );
+    for (const row of res.rows) clientMap[row.hubspot_id] = row.id;
+  }
+
+  if (contactHubspotIds.length > 0) {
+    const res = await pgQuery<{ hubspot_id: string; id: string }>(
+      `SELECT hubspot_id, id FROM contacts WHERE hubspot_id = ANY($1::text[])`,
+      [contactHubspotIds]
+    );
+    for (const row of res.rows) contactMap[row.hubspot_id] = row.id;
+  }
+
+  const CHUNK = 200;
   let count = 0;
 
-  for (const e of engagements) {
-    const clientRes = e.companyId
-      ? await pgQuery<{ id: string }>('SELECT id FROM clients WHERE hubspot_id = $1', [e.companyId])
-      : null;
-    const clientId = clientRes?.rows[0]?.id ?? null;
-
-    const contactRes = e.contactId
-      ? await pgQuery<{ id: string }>('SELECT id FROM contacts WHERE hubspot_id = $1', [e.contactId])
-      : null;
-    const contactId = contactRes?.rows[0]?.id ?? null;
+  for (let i = 0; i < engagements.length; i += CHUNK) {
+    const chunk = engagements.slice(i, i + CHUNK);
 
     await pgQuery(
       `INSERT INTO engagements (
         hubspot_id, client_id, contact_id, type, occurred_at,
         owner_id, title, raw_properties, last_synced_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+      )
+      SELECT * FROM UNNEST(
+        $1::text[], $2::uuid[], $3::uuid[], $4::text[], $5::timestamptz[],
+        $6::text[], $7::text[], $8::jsonb[], $9::timestamptz[]
+      ) AS t(hubspot_id, client_id, contact_id, type, occurred_at,
+             owner_id, title, raw_properties, last_synced_at)
       ON CONFLICT (hubspot_id) DO UPDATE SET
         client_id      = EXCLUDED.client_id,
         contact_id     = EXCLUDED.contact_id,
@@ -190,13 +292,18 @@ async function syncEngagements(engagements: HSEngagement[]): Promise<number> {
         raw_properties = EXCLUDED.raw_properties,
         last_synced_at = NOW()`,
       [
-        e.id, clientId, contactId, e.type,
-        new Date(e.occurredAt),
-        e.ownerId, e.title,
-        JSON.stringify(e.rawProperties),
+        chunk.map(e => e.id),
+        chunk.map(e => (e.companyId ? clientMap[e.companyId] ?? null : null)),
+        chunk.map(e => (e.contactId ? contactMap[e.contactId] ?? null : null)),
+        chunk.map(e => e.type),
+        chunk.map(e => new Date(e.occurredAt)),
+        chunk.map(e => e.ownerId),
+        chunk.map(e => e.title),
+        chunk.map(e => JSON.stringify(e.rawProperties)),
+        chunk.map(() => new Date()),
       ]
     );
-    count++;
+    count += chunk.length;
   }
 
   return count;
@@ -214,13 +321,21 @@ export async function runFullSync(): Promise<SyncResult> {
   try {
     logger.info('Starting HubSpot full sync');
 
+    // Fetch sequentially to respect HubSpot rate limits
     const [companies, contacts, tickets, engagements] = await Promise.allSettled([
-      client.getCompanies(),
-      client.getContacts(),
-      client.getTickets(),
-      client.getEngagements(),
+      client.getCompanies().then(r => { logger.info(`Fetched ${r.length} companies from HubSpot`); return r; }),
+      new Promise<Awaited<ReturnType<typeof client.getContacts>>>(res =>
+        setTimeout(() => client.getContacts().then(r => { logger.info(`Fetched ${r.length} contacts`); res(r); }), 2000)
+      ),
+      new Promise<Awaited<ReturnType<typeof client.getTickets>>>(res =>
+        setTimeout(() => client.getTickets().then(r => { logger.info(`Fetched ${r.length} tickets`); res(r); }), 4000)
+      ),
+      new Promise<Awaited<ReturnType<typeof client.getEngagements>>>(res =>
+        setTimeout(() => client.getEngagements().then(r => { logger.info(`Fetched ${r.length} engagements`); res(r); }), 6000)
+      ),
     ]);
 
+    // Sync in order (contacts/tickets need companies first)
     if (companies.status === 'fulfilled') {
       result.companies = await syncCompanies(companies.value);
       logger.info(`Synced ${result.companies} companies`);
@@ -256,14 +371,6 @@ export async function runFullSync(): Promise<SyncResult> {
   }
 
   result.durationMs = Date.now() - start;
-  logger.info('HubSpot sync complete', {
-    companies: result.companies,
-    contacts: result.contacts,
-    tickets: result.tickets,
-    engagements: result.engagements,
-    durationMs: result.durationMs,
-    errors: result.errors.length,
-  });
-
+  logger.info('HubSpot sync complete', result);
   return result;
 }

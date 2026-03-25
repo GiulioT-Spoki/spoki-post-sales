@@ -7,9 +7,10 @@ import { clientsApi } from '@/lib/api/client';
 import { HealthBadge } from '@/components/ui/HealthBadge';
 import { Badge } from '@/components/ui/Badge';
 import { Card } from '@/components/ui/Card';
-import { Search, ChevronRight, RefreshCw } from 'lucide-react';
+import { Search, ChevronRight, RefreshCw, Users } from 'lucide-react';
 import { formatDistanceToNow, format, differenceInDays } from 'date-fns';
 import { it } from 'date-fns/locale';
+import { getOwnerName, getOwnerByEmail } from '@/lib/config/owners';
 import type { ClientWithHealth, HealthStatus } from '@/types';
 
 const STATUS_OPTIONS: { value: string; label: string }[] = [
@@ -41,6 +42,7 @@ function RenewalCell({ date }: { date: string | null }) {
 
 export default function ClientsPage() {
   const { token } = useAuthStore();
+  const { user } = useAuthStore();
   const [clients, setClients] = useState<ClientWithHealth[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -48,12 +50,16 @@ export default function ClientsPage() {
   const [q, setQ] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [searchInput, setSearchInput] = useState('');
+  const [viewAll, setViewAll] = useState(false);
+
+  // Check if the logged-in user is a CS owner or a manager (sees all)
+  const isOwner = !!getOwnerByEmail(user?.email ?? '');
 
   const load = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     try {
-      const res = await clientsApi.list(token, { page, q, status: statusFilter });
+      const res = await clientsApi.list(token, { page, q, status: statusFilter, viewAll: viewAll || !isOwner ? true : undefined } as Parameters<typeof clientsApi.list>[1]);
       setClients(res.data);
       setTotal(res.total);
     } catch (e) {
@@ -61,7 +67,7 @@ export default function ClientsPage() {
     } finally {
       setLoading(false);
     }
-  }, [token, page, q, statusFilter]);
+  }, [token, page, q, statusFilter, viewAll, isOwner]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -81,10 +87,21 @@ export default function ClientsPage() {
           <h1 className="text-xl font-semibold text-slate-900">Clienti</h1>
           <p className="text-sm text-slate-500 mt-0.5">{total} clienti totali</p>
         </div>
-        <button onClick={load} className="flex items-center gap-2 px-3 py-2 text-sm text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors">
-          <RefreshCw className="w-4 h-4" />
-          Aggiorna
-        </button>
+        <div className="flex items-center gap-2">
+          {isOwner && (
+            <button
+              onClick={() => { setViewAll(v => !v); setPage(1); }}
+              className={`flex items-center gap-2 px-3 py-2 text-sm border rounded-lg transition-colors ${viewAll ? 'bg-blue-600 text-white border-blue-600' : 'text-slate-600 border-slate-300 hover:bg-slate-50'}`}
+            >
+              <Users className="w-4 h-4" />
+              {viewAll ? 'I miei clienti' : 'Vedi tutti'}
+            </button>
+          )}
+          <button onClick={load} className="flex items-center gap-2 px-3 py-2 text-sm text-slate-600 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors">
+            <RefreshCw className="w-4 h-4" />
+            Aggiorna
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -127,7 +144,7 @@ export default function ClientsPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-200">
-                {['Azienda', 'Salute', 'MRR', 'Piano', 'Ticket aperti', 'Ultimo contatto', 'Rinnovo'].map(h => (
+                {['Azienda', 'Salute', 'MRR', 'Piano', 'CS Owner', 'Ticket aperti', 'Ultimo contatto', 'Rinnovo'].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">{h}</th>
                 ))}
                 <th className="w-10" />
@@ -157,6 +174,9 @@ export default function ClientsPage() {
                     <td className="px-4 py-3 font-medium text-slate-700">{formatMrr(c.mrr)}</td>
                     <td className="px-4 py-3">
                       {c.plan ? <Badge variant="outline" size="sm">{c.plan}</Badge> : <span className="text-slate-400">—</span>}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-slate-600">
+                      {getOwnerName(c.csOwnerId)}
                     </td>
                     <td className="px-4 py-3">
                       {c.openTicketsCount > 0 ? (

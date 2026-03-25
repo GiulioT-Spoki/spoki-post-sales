@@ -26,14 +26,14 @@ export const GET = withAuth(async (_req: NextRequest, _auth: AuthenticatedReques
              WHEN renewal_date <= NOW() + INTERVAL '14 days' THEN '14d'
              WHEN renewal_date <= NOW() + INTERVAL '30 days' THEN '30d'
              WHEN renewal_date <= NOW() + INTERVAL '90 days' THEN '90d'
-           END AS window,
+           END AS renewal_window,
            COUNT(*) AS count,
            SUM(mrr) AS total_mrr
          FROM clients
          WHERE renewal_date IS NOT NULL
            AND renewal_date >= NOW()
            AND renewal_date <= NOW() + INTERVAL '90 days'
-         GROUP BY window`
+         GROUP BY renewal_window`
       ),
     ]);
 
@@ -52,7 +52,7 @@ export const GET = withAuth(async (_req: NextRequest, _auth: AuthenticatedReques
         openAlerts: parseInt(alertsStats.rows[0]?.count ?? '0'),
         tasks: Object.fromEntries(tasksStats.rows.map(r => [r.status, parseInt(r.count)])),
         renewals: Object.fromEntries(renewalStats.rows.map(r => [
-          r.window, { count: parseInt(r.count), totalMrr: parseFloat(r.total_mrr ?? '0') }
+          r.renewal_window, { count: parseInt(r.count), totalMrr: parseFloat(r.total_mrr ?? '0') }
         ])),
       }
     });
