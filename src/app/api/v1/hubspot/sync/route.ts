@@ -27,10 +27,14 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Allow GET for manual trigger in dev
+// Allow GET with secret for manual trigger
 export async function GET(request: NextRequest) {
-  if (process.env.NODE_ENV === 'production') {
-    return NextResponse.json({ success: false, error: 'Use POST in production' }, { status: 405 });
+  const { searchParams } = new URL(request.url);
+  const secret = searchParams.get('secret');
+  const cronSecret = process.env.CRON_SECRET;
+
+  if (process.env.NODE_ENV === 'production' && (!cronSecret || secret !== cronSecret)) {
+    return NextResponse.json({ success: false, error: 'Missing or invalid secret' }, { status: 401 });
   }
   return POST(request);
 }
